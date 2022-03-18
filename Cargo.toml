@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+  "crates/bin/view",
+  "crates/bin/bake",
+  "crates/lib/renderer",
+]
