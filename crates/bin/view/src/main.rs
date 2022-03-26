@@ -24,20 +24,25 @@ const HEIGHT: u32 = 600;
 const ENABLE_VALIDATION_LAYERS: bool = true;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const VERTEX_SIZE: usize = 20;
-const VERTICES: [Vertex; 3] = [
+const VERTICES: [Vertex; 4] = [
     Vertex {
-        pos: [0.0, -0.5],
-        color: [1.0, 1.0, 1.0],
+        pos: [-0.5, -0.5],
+        color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        pos: [0.5, 0.5],
+        pos: [0.5, -0.5],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
-        pos: [-0.5, 0.5],
+        pos: [0.5, 0.5],
         color: [0.0, 0.0, 1.0],
     },
+    Vertex {
+        pos: [-0.5, 0.5],
+        color: [1.0, 1.0, 1.0],
+    },
 ];
+const INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
 #[cfg(not(target_os = "macos"))]
 const REQUIRED_LAYERS: &[&str] = &["VK_LAYER_LUNARG_standard_validation"];
@@ -96,6 +101,8 @@ struct VulkanApp {
     transient_command_pool: vk::CommandPool,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
     command_buffers: Vec<vk::CommandBuffer>,
     in_flight_frames: InFlightFrames,
 }
@@ -170,6 +177,13 @@ impl VulkanApp {
             graphics_queue,
         );
 
+        let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
+            &device,
+            memory_properties,
+            transient_command_pool,
+            graphics_queue,
+        );
+
         let command_buffers = Self::create_and_register_command_buffers(
             &device,
             command_pool,
@@ -177,6 +191,7 @@ impl VulkanApp {
             render_pass,
             swapchain_properties,
             vertex_buffer,
+            index_buffer,
             pipeline,
         );
 
@@ -208,6 +223,8 @@ impl VulkanApp {
             transient_command_pool,
             vertex_buffer,
             vertex_buffer_memory,
+            index_buffer,
+            index_buffer_memory,
             command_buffers,
             in_flight_frames,
         }
@@ -824,7 +841,41 @@ impl VulkanApp {
         command_pool: vk::CommandPool,
         transfer_queue: vk::Queue,
     ) -> (vk::Buffer, vk::DeviceMemory) {
-        let size = (VERTICES.len() * VERTEX_SIZE) as vk::DeviceSize;
+        Self::create_device_local_buffer_with_data::<u32, _>(
+            device,
+            mem_properties,
+            command_pool,
+            transfer_queue,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &VERTICES,
+        )
+    }
+
+    fn create_index_buffer(
+        device: &Device,
+        mem_properties: vk::PhysicalDeviceMemoryProperties,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        Self::create_device_local_buffer_with_data::<u16, _>(
+            device,
+            mem_properties,
+            command_pool,
+            transfer_queue,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &INDICES,
+        )
+    }
+
+    fn create_device_local_buffer_with_data<A, T: Copy>(
+        device: &Device,
+        mem_properties: vk::PhysicalDeviceMemoryProperties,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+        usage: vk::BufferUsageFlags,
+        data: &[T],
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let size = (data.len() * std::mem::size_of::<T>()) as vk::DeviceSize;
         let (staging_buffer, staging_memory, staging_mem_size) = Self::create_buffer(
             device,
             mem_properties,
@@ -838,8 +889,9 @@ impl VulkanApp {
                 .map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())
                 .unwrap();
             let mut align =
-                ash::util::Align::new(data_ptr, std::mem::align_of::<u32>() as _, staging_mem_size);
-            align.copy_from_slice(&VERTICES);
+                ash::util::Align::new(data_ptr, std::mem::align_of::<A>() as _, staging_mem_size);
+
+            align.copy_from_slice(data);
             device.unmap_memory(staging_memory);
         };
 
@@ -847,7 +899,7 @@ impl VulkanApp {
             device,
             mem_properties,
             size,
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::TRANSFER_DST | usage,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         );
 
@@ -991,6 +1043,7 @@ impl VulkanApp {
         render_pass: vk::RenderPass,
         swapchain_properties: SwapchainProperties,
         vertex_buffer: vk::Buffer,
+        index_buffer: vk::Buffer,
         graphics_pipeline: vk::Pipeline,
     ) -> Vec<vk::CommandBuffer> {
         let allocate_info = vk::CommandBufferAllocateInfo::builder()
@@ -1061,8 +1114,13 @@ impl VulkanApp {
                 let offsets = [0];
                 unsafe { device.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets) };
 
+                // bind index buffer
+                unsafe {
+                    device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT16)
+                };
+
                 // draw
-                unsafe { device.cmd_draw(buffer, 3, 1, 0, 0) };
+                unsafe { device.cmd_draw_indexed(buffer, INDICES.len() as _, 1, 0, 0, 0) };
 
                 // end render pass
                 unsafe { device.cmd_end_render_pass(buffer) };
@@ -1234,6 +1292,7 @@ impl VulkanApp {
             render_pass,
             properties,
             self.vertex_buffer,
+            self.index_buffer,
             pipeline,
         );
 
@@ -1304,6 +1363,8 @@ impl Drop for VulkanApp {
         self.cleanup_swapchain();
         self.in_flight_frames.destroy(&self.device);
         unsafe {
+            self.device.destroy_buffer(self.index_buffer, None);
+            self.device.free_memory(self.index_buffer_memory, None);
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
             self.device
