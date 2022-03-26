@@ -13,6 +13,7 @@ use ash::{
 };
 use env_logger::Env;
 use winit::{
+    dpi::PhysicalSize,
     event::{Event, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
@@ -21,6 +22,22 @@ use winit::{
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const ENABLE_VALIDATION_LAYERS: bool = true;
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+const VERTEX_SIZE: usize = 20;
+const VERTICES: [Vertex; 3] = [
+    Vertex {
+        pos: [0.0, -0.5],
+        color: [1.0, 1.0, 1.0],
+    },
+    Vertex {
+        pos: [0.5, 0.5],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        pos: [-0.5, 0.5],
+        color: [0.0, 0.0, 1.0],
+    },
+];
 
 #[cfg(not(target_os = "macos"))]
 const REQUIRED_LAYERS: &[&str] = &["VK_LAYER_LUNARG_standard_validation"];
@@ -55,28 +72,32 @@ unsafe extern "system" fn vulkan_debug_callback(
 
 struct VulkanApp {
     window: Window,
+    resize_dimensions: Option<[u32; 2]>,
     _entry: Entry,
     instance: Instance,
     debug_report_callback: Option<(DebugUtils, DebugUtilsMessengerEXT)>,
     surface: Surface,
     surface_khr: vk::SurfaceKHR,
-    _physical_device: vk::PhysicalDevice,
+    physical_device: vk::PhysicalDevice,
+    queue_families_indices: QueueFamiliesIndices,
     device: Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     swapchain: Swapchain,
     swapchain_khr: vk::SwapchainKHR,
-    _images: Vec<vk::Image>,
-    _swapchain_properties: SwapchainProperties,
+    swapchain_properties: SwapchainProperties,
+    images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
+    transient_command_pool: vk::CommandPool,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
     command_buffers: Vec<vk::CommandBuffer>,
-    image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
+    in_flight_frames: InFlightFrames,
 }
 
 impl VulkanApp {
@@ -86,75 +107,109 @@ impl VulkanApp {
             .with_inner_size(winit::dpi::LogicalSize::new(WIDTH, HEIGHT))
             .build(event_loop)
             .expect("Failed to create window.");
+
         let entry = unsafe { Entry::load().expect("Failed to load Vulkan entry") };
         let instance = Self::create_instance(&entry, &window);
+
         let surface = Surface::new(&entry, &instance);
         let surface_khr =
             unsafe { ash_window::create_surface(&entry, &instance, &window, None).unwrap() };
+
         let debug_report_callback = Self::setup_debug_messenger(&entry, &instance);
-        let physical_device = Self::pick_physical_device(&instance, &surface, surface_khr);
+
+        let (physical_device, queue_families_indices) =
+            Self::pick_physical_device(&instance, &surface, surface_khr);
+        let memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
         let (device, graphics_queue, present_queue) =
             Self::create_logical_device_with_graphics_queue(
                 &instance,
-                &surface,
-                surface_khr,
                 physical_device,
+                queue_families_indices,
             );
 
-        let (swapchain, swapchain_khr, properties, images) = Self::create_swapchain_and_images(
-            &instance,
-            physical_device,
-            &device,
-            &surface,
-            surface_khr,
-        );
+        let (swapchain, swapchain_khr, swapchain_properties, images) =
+            Self::create_swapchain_and_images(
+                &instance,
+                physical_device,
+                &device,
+                &surface,
+                surface_khr,
+                queue_families_indices,
+                [WIDTH, HEIGHT],
+            );
 
         let swapchain_image_views =
-            Self::create_swapchain_image_views(&device, &images, properties);
+            Self::create_swapchain_image_views(&device, &images, swapchain_properties);
 
-        let render_pass = Self::create_render_pass(&device, properties);
-        let (pipeline, layout) = Self::create_pipeline(&device, properties, render_pass);
-        let swapchain_framebuffers =
-            Self::create_framebuffers(&device, &swapchain_image_views, render_pass, properties);
+        let render_pass = Self::create_render_pass(&device, swapchain_properties);
+        let (pipeline, layout) = Self::create_pipeline(&device, swapchain_properties, render_pass);
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &device,
+            &swapchain_image_views,
+            render_pass,
+            swapchain_properties,
+        );
 
-        let command_pool =
-            Self::create_command_pool(&device, &instance, &surface, surface_khr, physical_device);
+        let command_pool = Self::create_command_pool(
+            &device,
+            queue_families_indices,
+            vk::CommandPoolCreateFlags::empty(),
+        );
+        let transient_command_pool = Self::create_command_pool(
+            &device,
+            queue_families_indices,
+            vk::CommandPoolCreateFlags::TRANSIENT,
+        );
+
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
+            &device,
+            memory_properties,
+            transient_command_pool,
+            graphics_queue,
+        );
+
         let command_buffers = Self::create_and_register_command_buffers(
             &device,
             command_pool,
             &swapchain_framebuffers,
             render_pass,
-            properties,
+            swapchain_properties,
+            vertex_buffer,
             pipeline,
         );
 
-        let (image_available_semaphore, render_finished_semaphore) =
-            Self::create_semaphores(&device);
+        let in_flight_frames = Self::create_sync_objects(&device);
 
         Self {
             window,
+            resize_dimensions: None,
             _entry: entry,
             instance,
             debug_report_callback,
             surface,
             surface_khr,
-            _physical_device: physical_device,
+            physical_device,
+            queue_families_indices,
             device,
             graphics_queue,
             present_queue,
             swapchain,
             swapchain_khr,
-            _images: images,
-            _swapchain_properties: properties,
+            images,
+            swapchain_properties,
             swapchain_image_views,
             render_pass,
             pipeline_layout: layout,
             pipeline,
             swapchain_framebuffers,
             command_pool,
+            transient_command_pool,
+            vertex_buffer,
+            vertex_buffer_memory,
             command_buffers,
-            image_available_semaphore,
-            render_finished_semaphore,
+            in_flight_frames,
         }
     }
 
@@ -199,7 +254,7 @@ impl VulkanApp {
         instance: &Instance,
         surface: &Surface,
         surface_khr: vk::SurfaceKHR,
-    ) -> vk::PhysicalDevice {
+    ) -> (vk::PhysicalDevice, QueueFamiliesIndices) {
         let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
         let device = devices
             .into_iter()
@@ -210,7 +265,14 @@ impl VulkanApp {
         log::debug!("Selected physical device: {:?}", unsafe {
             CStr::from_ptr(props.device_name.as_ptr())
         });
-        device
+
+        let (graphics, present) = Self::find_queue_families(instance, surface, surface_khr, device);
+        let queue_families_indices = QueueFamiliesIndices {
+            graphics_index: graphics.unwrap(),
+            present_index: present.unwrap(),
+        };
+
+        (device, queue_families_indices)
     }
 
     fn is_device_suitable(
@@ -303,14 +365,12 @@ impl VulkanApp {
 
     fn create_logical_device_with_graphics_queue(
         instance: &Instance,
-        surface: &Surface,
-        surface_khr: vk::SurfaceKHR,
         physical_device: vk::PhysicalDevice,
+        queue_families_indices: QueueFamiliesIndices,
     ) -> (Device, vk::Queue, vk::Queue) {
-        let (graphics_family_index, present_family_index) =
-            Self::find_queue_families(instance, surface, surface_khr, physical_device);
-        let graphics_family_index = graphics_family_index.unwrap();
-        let present_family_index = present_family_index.unwrap();
+        let graphics_family_index = queue_families_indices.graphics_index;
+        let present_family_index = queue_families_indices.present_index;
+
         let queue_priorities = [1.0];
 
         let queue_create_infos = {
@@ -419,6 +479,8 @@ impl VulkanApp {
         device: &Device,
         surface: &Surface,
         surface_khr: vk::SurfaceKHR,
+        queue_families_indices: QueueFamiliesIndices,
+        dimensions: [u32; 2],
     ) -> (
         Swapchain,
         vk::SwapchainKHR,
@@ -426,9 +488,10 @@ impl VulkanApp {
         Vec<vk::Image>,
     ) {
         let details = SwapchainSupportDetails::new(physical_device, surface, surface_khr);
-        let format = Self::choose_swapchain_surface_format(&details.formats);
-        let present_mode = Self::choose_swapchain_surface_present_mode(&details.present_modes);
-        let extent = Self::choose_swapchain_extent(details.capabilities);
+        let properties = details.get_ideal_swapchain_properties(dimensions);
+        let format = properties.format;
+        let present_mode = properties.present_mode;
+        let extent = properties.extent;
 
         let image_count = {
             let max = details.capabilities.max_image_count;
@@ -448,9 +511,9 @@ impl VulkanApp {
             image_count,
         );
 
-        let (graphics, present) =
-            Self::find_queue_families(instance, surface, surface_khr, physical_device);
-        let families_indices = [graphics.unwrap(), present.unwrap()];
+        let graphics = queue_families_indices.graphics_index;
+        let present = queue_families_indices.present_index;
+        let families_indices = [graphics, present];
 
         let create_info = {
             let mut builder = vk::SwapchainCreateInfoKHR::builder()
@@ -462,12 +525,12 @@ impl VulkanApp {
                 .image_array_layers(1)
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT);
 
-            builder = match (graphics, present) {
-                (Some(graphics), Some(present)) if graphics != present => builder
+            builder = if graphics != present {
+                builder
                     .image_sharing_mode(vk::SharingMode::CONCURRENT)
-                    .queue_family_indices(&families_indices),
-                (Some(_), Some(_)) => builder.image_sharing_mode(vk::SharingMode::EXCLUSIVE),
-                _ => panic!(),
+                    .queue_family_indices(&families_indices)
+            } else {
+                builder.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             };
 
             builder
@@ -489,49 +552,6 @@ impl VulkanApp {
         };
 
         (swapchain, swapchain_khr, properties, images)
-    }
-
-    fn choose_swapchain_surface_format(
-        available_formats: &[vk::SurfaceFormatKHR],
-    ) -> vk::SurfaceFormatKHR {
-        if available_formats.len() == 1 && available_formats[0].format == vk::Format::UNDEFINED {
-            return vk::SurfaceFormatKHR {
-                format: vk::Format::B8G8R8A8_UNORM,
-                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            };
-        }
-
-        *available_formats
-            .iter()
-            .find(|format| {
-                format.format == vk::Format::B8G8R8A8_UNORM
-                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            })
-            .unwrap_or(&available_formats[0])
-    }
-
-    fn choose_swapchain_surface_present_mode(
-        available_present_modes: &[vk::PresentModeKHR],
-    ) -> vk::PresentModeKHR {
-        if available_present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else if available_present_modes.contains(&vk::PresentModeKHR::FIFO) {
-            vk::PresentModeKHR::FIFO
-        } else {
-            vk::PresentModeKHR::IMMEDIATE
-        }
-    }
-
-    fn choose_swapchain_extent(capabilities: vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
-        if capabilities.current_extent.width != std::u32::MAX {
-            return capabilities.current_extent;
-        }
-
-        let min = capabilities.min_image_extent;
-        let max = capabilities.max_image_extent;
-        let width = WIDTH.min(max.width).max(min.width);
-        let height = HEIGHT.min(max.height).max(min.height);
-        vk::Extent2D { width, height }
     }
 
     fn create_swapchain_image_views(
@@ -640,7 +660,12 @@ impl VulkanApp {
 
         let shader_state_infos = [vertex_shader_state_info, fragment_shader_state_info];
 
-        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder().build();
+        let vertex_binding_descs = [Vertex::get_binding_descripion()];
+        let vertex_attribute_descs = Vertex::get_attribute_descriptions();
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_binding_descriptions(&vertex_binding_descs)
+            .vertex_attribute_descriptions(&vertex_attribute_descs)
+            .build();
 
         let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -778,17 +803,12 @@ impl VulkanApp {
 
     fn create_command_pool(
         device: &Device,
-        instance: &Instance,
-        surface: &Surface,
-        surface_khr: vk::SurfaceKHR,
-        physical_device: vk::PhysicalDevice,
+        queue_families_indices: QueueFamiliesIndices,
+        create_flags: vk::CommandPoolCreateFlags,
     ) -> vk::CommandPool {
-        let (graphics_family, _) =
-            Self::find_queue_families(instance, surface, surface_khr, physical_device);
-
         let command_pool_info = vk::CommandPoolCreateInfo::builder()
-            .queue_family_index(graphics_family.unwrap())
-            .flags(vk::CommandPoolCreateFlags::empty())
+            .queue_family_index(queue_families_indices.graphics_index)
+            .flags(create_flags)
             .build();
 
         unsafe {
@@ -798,12 +818,179 @@ impl VulkanApp {
         }
     }
 
+    fn create_vertex_buffer(
+        device: &Device,
+        mem_properties: vk::PhysicalDeviceMemoryProperties,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let size = (VERTICES.len() * VERTEX_SIZE) as vk::DeviceSize;
+        let (staging_buffer, staging_memory, staging_mem_size) = Self::create_buffer(
+            device,
+            mem_properties,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+
+        unsafe {
+            let data_ptr = device
+                .map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())
+                .unwrap();
+            let mut align =
+                ash::util::Align::new(data_ptr, std::mem::align_of::<u32>() as _, staging_mem_size);
+            align.copy_from_slice(&VERTICES);
+            device.unmap_memory(staging_memory);
+        };
+
+        let (buffer, memory, _) = Self::create_buffer(
+            device,
+            mem_properties,
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+
+        Self::copy_buffer(
+            device,
+            command_pool,
+            transfer_queue,
+            staging_buffer,
+            buffer,
+            size,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_memory, None);
+        }
+
+        (buffer, memory)
+    }
+
+    fn create_buffer(
+        device: &Device,
+        device_mem_properties: vk::PhysicalDeviceMemoryProperties,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        mem_properties: vk::MemoryPropertyFlags,
+    ) -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
+        let buffer = {
+            let buffer_info = vk::BufferCreateInfo::builder()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .build();
+
+            unsafe { device.create_buffer(&buffer_info, None).unwrap() }
+        };
+
+        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let memory = {
+            let mem_type =
+                Self::find_memory_type(mem_requirements, device_mem_properties, mem_properties);
+
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(mem_type)
+                .build();
+            unsafe { device.allocate_memory(&alloc_info, None).unwrap() }
+        };
+
+        unsafe { device.bind_buffer_memory(buffer, memory, 0).unwrap() }
+
+        (buffer, memory, mem_requirements.size)
+    }
+
+    fn copy_buffer(
+        device: &Device,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+        src: vk::Buffer,
+        dst: vk::Buffer,
+        size: vk::DeviceSize,
+    ) {
+        let command_buffer = {
+            let alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_pool(command_pool)
+                .command_buffer_count(1)
+                .build();
+
+            unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] }
+        };
+
+        let command_buffers = [command_buffer];
+
+        // begin recording
+        {
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                .build();
+            unsafe {
+                device
+                    .begin_command_buffer(command_buffer, &begin_info)
+                    .unwrap()
+            };
+        }
+
+        // copy
+        {
+            let region = vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size,
+            };
+            let regions = [region];
+
+            unsafe { device.cmd_copy_buffer(command_buffer, src, dst, &regions) };
+        }
+
+        // end recording
+        unsafe { device.end_command_buffer(command_buffer).unwrap() };
+
+        // submit and wait
+        {
+            let submit_info = vk::SubmitInfo::builder()
+                .command_buffers(&command_buffers)
+                .build();
+            let submit_infos = [submit_info];
+            unsafe {
+                device
+                    .queue_submit(transfer_queue, &submit_infos, vk::Fence::null())
+                    .unwrap();
+                device.queue_wait_idle(transfer_queue).unwrap();
+            }
+        }
+
+        // free
+        unsafe { device.free_command_buffers(command_pool, &command_buffers) };
+    }
+
+    fn find_memory_type(
+        requirements: vk::MemoryRequirements,
+        mem_properties: vk::PhysicalDeviceMemoryProperties,
+        required_properties: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        for i in 0..mem_properties.memory_type_count {
+            if requirements.memory_type_bits & (1 << i) != 0
+                && mem_properties.memory_types[i as usize]
+                    .property_flags
+                    .contains(required_properties)
+            {
+                return i;
+            }
+        }
+        panic!("Failed to find suitable memory type.")
+    }
+
     fn create_and_register_command_buffers(
         device: &Device,
         pool: vk::CommandPool,
         framebuffers: &[vk::Framebuffer],
         render_pass: vk::RenderPass,
         swapchain_properties: SwapchainProperties,
+        vertex_buffer: vk::Buffer,
         graphics_pipeline: vk::Pipeline,
     ) -> Vec<vk::CommandBuffer> {
         let allocate_info = vk::CommandBufferAllocateInfo::builder()
@@ -869,6 +1056,11 @@ impl VulkanApp {
                     )
                 };
 
+                // bind vertex buffer
+                let vertex_buffers = [vertex_buffer];
+                let offsets = [0];
+                unsafe { device.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets) };
+
                 // draw
                 unsafe { device.cmd_draw(buffer, 3, 1, 0, 0) };
 
@@ -882,36 +1074,75 @@ impl VulkanApp {
         buffers
     }
 
-    fn create_semaphores(device: &Device) -> (vk::Semaphore, vk::Semaphore) {
-        let image_available = {
-            let semaphore_info = vk::SemaphoreCreateInfo::builder().build();
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
-        };
-        let render_finished = {
-            let semaphore_info = vk::SemaphoreCreateInfo::builder().build();
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
-        };
+    fn create_sync_objects(device: &Device) -> InFlightFrames {
+        let mut sync_objects_vec = Vec::new();
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let image_available_semaphore = {
+                let semaphore_info = vk::SemaphoreCreateInfo::builder().build();
+                unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
+            };
 
-        (image_available, render_finished)
+            let render_finished_semaphore = {
+                let semaphore_info = vk::SemaphoreCreateInfo::builder().build();
+                unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
+            };
+
+            let in_flight_fence = {
+                let fence_info = vk::FenceCreateInfo::builder()
+                    .flags(vk::FenceCreateFlags::SIGNALED)
+                    .build();
+                unsafe { device.create_fence(&fence_info, None).unwrap() }
+            };
+
+            let sync_objects = SyncObjects {
+                image_available_semaphore,
+                render_finished_semaphore,
+                fence: in_flight_fence,
+            };
+            sync_objects_vec.push(sync_objects)
+        }
+
+        InFlightFrames::new(sync_objects_vec)
     }
 
     fn draw_frame(&mut self) {
         log::trace!("Drawing frame.");
 
-        let image_index = unsafe {
-            self.swapchain
-                .acquire_next_image(
-                    self.swapchain_khr,
-                    std::u64::MAX,
-                    self.image_available_semaphore,
-                    vk::Fence::null(),
-                )
-                .unwrap()
-                .0
+        let sync_objects = self.in_flight_frames.next().unwrap();
+        let image_available_semaphore = sync_objects.image_available_semaphore;
+        let render_finished_semaphore = sync_objects.render_finished_semaphore;
+        let in_flight_fence = sync_objects.fence;
+
+        let wait_fences = [in_flight_fence];
+
+        unsafe {
+            self.device
+                .wait_for_fences(&wait_fences, true, std::u64::MAX)
+                .unwrap();
         };
 
-        let wait_semaphores = [self.image_available_semaphore];
-        let signal_semaphores = [self.render_finished_semaphore];
+        let result = unsafe {
+            self.swapchain.acquire_next_image(
+                self.swapchain_khr,
+                std::u64::MAX,
+                image_available_semaphore,
+                vk::Fence::null(),
+            )
+        };
+
+        let image_index = match result {
+            Ok((image_index, _)) => image_index,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                self.recreate_swapchain();
+                return;
+            }
+            Err(error) => panic!("Error while acquiring next image. Cause: {}", error),
+        };
+
+        unsafe { self.device.reset_fences(&wait_fences).unwrap() };
+
+        let wait_semaphores = [image_available_semaphore];
+        let signal_semaphores = [render_finished_semaphore];
 
         // submit command buffer
         {
@@ -926,7 +1157,7 @@ impl VulkanApp {
             let submit_infos = [submit_info];
             unsafe {
                 self.device
-                    .queue_submit(self.graphics_queue, &submit_infos, vk::Fence::null())
+                    .queue_submit(self.graphics_queue, &submit_infos, in_flight_fence)
                     .unwrap()
             }
         }
@@ -941,14 +1172,99 @@ impl VulkanApp {
                 .image_indices(&images_indices)
                 .build();
 
-            unsafe {
+            let result = unsafe {
                 self.swapchain
                     .queue_present(self.present_queue, &present_info)
-                    .unwrap()
             };
+
+            match result {
+                Ok(is_suboptimal) if is_suboptimal == true => {
+                    self.recreate_swapchain();
+                }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.recreate_swapchain();
+                }
+                Err(error) => panic!("Failed to present queue. Cause: {}", error),
+                _ => {}
+            }
+
+            if self.resize_dimensions.is_some() {
+                self.recreate_swapchain();
+            }
         }
+    }
+
+    fn recreate_swapchain(&mut self) {
+        log::debug!("Recreating swapchain.");
 
         unsafe { self.device.device_wait_idle().unwrap() };
+
+        self.cleanup_swapchain();
+
+        let dimensions = self.resize_dimensions.unwrap_or([
+            self.swapchain_properties.extent.width,
+            self.swapchain_properties.extent.height,
+        ]);
+
+        let (swapchain, swapchain_khr, properties, images) = Self::create_swapchain_and_images(
+            &self.instance,
+            self.physical_device,
+            &self.device,
+            &self.surface,
+            self.surface_khr,
+            self.queue_families_indices,
+            dimensions,
+        );
+        let swapchain_image_views =
+            Self::create_swapchain_image_views(&self.device, &images, properties);
+
+        let render_pass = Self::create_render_pass(&self.device, properties);
+        let (pipeline, layout) = Self::create_pipeline(&self.device, properties, render_pass);
+        let swapchain_framebuffers = Self::create_framebuffers(
+            &self.device,
+            &swapchain_image_views,
+            render_pass,
+            properties,
+        );
+
+        let command_buffers = Self::create_and_register_command_buffers(
+            &self.device,
+            self.command_pool,
+            &swapchain_framebuffers,
+            render_pass,
+            properties,
+            self.vertex_buffer,
+            pipeline,
+        );
+
+        self.swapchain = swapchain;
+        self.swapchain_khr = swapchain_khr;
+        self.swapchain_properties = properties;
+        self.images = images;
+        self.swapchain_image_views = swapchain_image_views;
+        self.render_pass = render_pass;
+        self.pipeline = pipeline;
+        self.pipeline_layout = layout;
+        self.swapchain_framebuffers = swapchain_framebuffers;
+        self.command_buffers = command_buffers;
+    }
+
+    fn cleanup_swapchain(&mut self) {
+        unsafe {
+            self.swapchain_framebuffers
+                .iter()
+                .for_each(|f| self.device.destroy_framebuffer(*f, None));
+            self.device
+                .free_command_buffers(self.command_pool, &self.command_buffers);
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
+            self.swapchain_image_views
+                .iter()
+                .for_each(|v| self.device.destroy_image_view(*v, None));
+            self.swapchain.destroy_swapchain(self.swapchain_khr, None);
+        }
     }
 
     pub fn main_loop(mut self, event_loop: EventLoop<()>) {
@@ -956,6 +1272,9 @@ impl VulkanApp {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
                     *control_flow = ControlFlow::Exit;
+                }
+                WindowEvent::Resized(PhysicalSize { width, height }) => {
+                    self.resize_dimensions = Some([width as u32, height as u32]);
                 }
                 WindowEvent::KeyboardInput { input, .. } => match input {
                     winit::event::KeyboardInput {
@@ -982,23 +1301,14 @@ impl VulkanApp {
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         log::debug!("Dropping application.");
+        self.cleanup_swapchain();
+        self.in_flight_frames.destroy(&self.device);
         unsafe {
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.free_memory(self.vertex_buffer_memory, None);
             self.device
-                .destroy_semaphore(self.render_finished_semaphore, None);
-            self.device
-                .destroy_semaphore(self.image_available_semaphore, None);
+                .destroy_command_pool(self.transient_command_pool, None);
             self.device.destroy_command_pool(self.command_pool, None);
-            self.swapchain_framebuffers
-                .iter()
-                .for_each(|f| self.device.destroy_framebuffer(*f, None));
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
-            self.swapchain_image_views
-                .iter()
-                .for_each(|v| self.device.destroy_image_view(*v, None));
-            self.swapchain.destroy_swapchain(self.swapchain_khr, None);
             self.device.destroy_device(None);
             self.surface.destroy_surface(self.surface_khr, None);
             if let Some((report, callback)) = self.debug_report_callback.take() {
@@ -1045,6 +1355,67 @@ impl SwapchainSupportDetails {
             present_modes,
         }
     }
+
+    fn get_ideal_swapchain_properties(
+        &self,
+        preferred_dimensions: [u32; 2],
+    ) -> SwapchainProperties {
+        let format = Self::choose_swapchain_surface_format(&self.formats);
+        let present_mode = Self::choose_swapchain_surface_present_mode(&self.present_modes);
+        let extent = Self::choose_swapchain_extent(self.capabilities, preferred_dimensions);
+
+        SwapchainProperties {
+            format,
+            present_mode,
+            extent,
+        }
+    }
+
+    fn choose_swapchain_surface_format(
+        available_formats: &[vk::SurfaceFormatKHR],
+    ) -> vk::SurfaceFormatKHR {
+        if available_formats.len() == 1 && available_formats[0].format == vk::Format::UNDEFINED {
+            return vk::SurfaceFormatKHR {
+                format: vk::Format::B8G8R8A8_UNORM,
+                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }
+
+        *available_formats
+            .iter()
+            .find(|format| {
+                format.format == vk::Format::B8G8R8A8_UNORM
+                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+            .unwrap_or(&available_formats[0])
+    }
+
+    fn choose_swapchain_surface_present_mode(
+        available_present_modes: &[vk::PresentModeKHR],
+    ) -> vk::PresentModeKHR {
+        if available_present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            vk::PresentModeKHR::MAILBOX
+        } else if available_present_modes.contains(&vk::PresentModeKHR::FIFO) {
+            vk::PresentModeKHR::FIFO
+        } else {
+            vk::PresentModeKHR::IMMEDIATE
+        }
+    }
+
+    fn choose_swapchain_extent(
+        capabilities: vk::SurfaceCapabilitiesKHR,
+        preferred_dimensions: [u32; 2],
+    ) -> vk::Extent2D {
+        if capabilities.current_extent.width != std::u32::MAX {
+            return capabilities.current_extent;
+        }
+
+        let min = capabilities.min_image_extent;
+        let max = capabilities.max_image_extent;
+        let width = preferred_dimensions[0].min(max.width).max(min.width);
+        let height = preferred_dimensions[1].min(max.height).max(min.height);
+        vk::Extent2D { width, height }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1052,6 +1423,93 @@ struct SwapchainProperties {
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
     extent: vk::Extent2D,
+}
+
+#[derive(Clone, Copy)]
+struct QueueFamiliesIndices {
+    graphics_index: u32,
+    present_index: u32,
+}
+
+#[derive(Clone, Copy)]
+struct SyncObjects {
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    fence: vk::Fence,
+}
+
+impl SyncObjects {
+    fn destroy(&self, device: &Device) {
+        unsafe {
+            device.destroy_semaphore(self.image_available_semaphore, None);
+            device.destroy_semaphore(self.render_finished_semaphore, None);
+            device.destroy_fence(self.fence, None);
+        }
+    }
+}
+
+struct InFlightFrames {
+    sync_objects: Vec<SyncObjects>,
+    current_frame: usize,
+}
+
+impl InFlightFrames {
+    fn new(sync_objects: Vec<SyncObjects>) -> Self {
+        Self {
+            sync_objects,
+            current_frame: 0,
+        }
+    }
+
+    fn destroy(&self, device: &Device) {
+        self.sync_objects.iter().for_each(|o| o.destroy(&device));
+    }
+}
+
+impl Iterator for InFlightFrames {
+    type Item = SyncObjects;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.sync_objects[self.current_frame];
+
+        self.current_frame = (self.current_frame + 1) % self.sync_objects.len();
+
+        Some(next)
+    }
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    fn get_binding_descripion() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(VERTEX_SIZE as _)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()
+    }
+
+    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+        let position_desc = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(0)
+            .build();
+        let color_desc = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(8)
+            .build();
+
+        [position_desc, color_desc]
+    }
 }
 
 fn main() {
