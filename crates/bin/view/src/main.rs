@@ -5,6 +5,7 @@ use std::{
     borrow::Cow,
     ffi::{CStr, CString},
     mem::{align_of, size_of},
+    path::Path,
     time::Instant,
 };
 
@@ -18,7 +19,7 @@ use ash::{
 };
 use context::VkContext;
 use env_logger::Env;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use texture::Texture;
 use winit::{
     dpi::PhysicalSize,
@@ -31,50 +32,50 @@ const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const ENABLE_VALIDATION_LAYERS: bool = true;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
-const VERTICES: [Vertex; 8] = [
-    Vertex {
-        pos: [-0.5, -0.5, 0.0],
-        color: [1.0, 0.0, 0.0],
-        coords: [0.0, 0.0],
-    },
-    Vertex {
-        pos: [0.5, -0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-        coords: [1.0, 0.0],
-    },
-    Vertex {
-        pos: [0.5, 0.5, 0.0],
-        color: [0.0, 0.0, 1.0],
-        coords: [1.0, 1.0],
-    },
-    Vertex {
-        pos: [-0.5, 0.5, 0.0],
-        color: [1.0, 1.0, 1.0],
-        coords: [0.0, 1.0],
-    },
-    // second quad
-    Vertex {
-        pos: [-0.5, -0.5, -0.5],
-        color: [1.0, 1.0, 1.0],
-        coords: [0.0, 0.0],
-    },
-    Vertex {
-        pos: [0.5, -0.5, -0.5],
-        color: [1.0, 1.0, 1.0],
-        coords: [1.0, 0.0],
-    },
-    Vertex {
-        pos: [0.5, 0.5, -0.5],
-        color: [1.0, 1.0, 1.0],
-        coords: [1.0, 1.0],
-    },
-    Vertex {
-        pos: [-0.5, 0.5, -0.5],
-        color: [1.0, 1.0, 1.0],
-        coords: [0.0, 1.0],
-    },
-];
-const INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
+// const VERTICES: [Vertex; 8] = [
+//     Vertex {
+//         pos: [-0.5, -0.5, 0.0],
+//         color: [1.0, 0.0, 0.0],
+//         coords: [0.0, 0.0],
+//     },
+//     Vertex {
+//         pos: [0.5, -0.5, 0.0],
+//         color: [0.0, 1.0, 0.0],
+//         coords: [1.0, 0.0],
+//     },
+//     Vertex {
+//         pos: [0.5, 0.5, 0.0],
+//         color: [0.0, 0.0, 1.0],
+//         coords: [1.0, 1.0],
+//     },
+//     Vertex {
+//         pos: [-0.5, 0.5, 0.0],
+//         color: [1.0, 1.0, 1.0],
+//         coords: [0.0, 1.0],
+//     },
+//     // second quad
+//     Vertex {
+//         pos: [-0.5, -0.5, -0.5],
+//         color: [1.0, 1.0, 1.0],
+//         coords: [0.0, 0.0],
+//     },
+//     Vertex {
+//         pos: [0.5, -0.5, -0.5],
+//         color: [1.0, 1.0, 1.0],
+//         coords: [1.0, 0.0],
+//     },
+//     Vertex {
+//         pos: [0.5, 0.5, -0.5],
+//         color: [1.0, 1.0, 1.0],
+//         coords: [1.0, 1.0],
+//     },
+//     Vertex {
+//         pos: [-0.5, 0.5, -0.5],
+//         color: [1.0, 1.0, 1.0],
+//         coords: [0.0, 1.0],
+//     },
+// ];
+// const INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 
 #[cfg(not(target_os = "macos"))]
 const REQUIRED_LAYERS: &[&str] = &["VK_LAYER_LUNARG_standard_validation"];
@@ -111,13 +112,6 @@ struct VulkanApp {
     start_instant: Instant,
     window: Window,
     resize_dimensions: Option<[u32; 2]>,
-    // _entry: Entry,
-    // instance: Instance,
-    // debug_report_callback: Option<(DebugUtils, DebugUtilsMessengerEXT)>,
-    // surface: Surface,
-    // surface_khr: vk::SurfaceKHR,
-    // physical_device: vk::PhysicalDevice,
-    // device: Device,
     vk_context: VkContext,
     queue_families_indices: QueueFamiliesIndices,
     graphics_queue: vk::Queue,
@@ -135,15 +129,9 @@ struct VulkanApp {
     command_pool: vk::CommandPool,
     transient_command_pool: vk::CommandPool,
     depth_format: vk::Format,
-    // depth_image: vk::Image,
-    // depth_image_memory: vk::DeviceMemory,
-    // depth_image_view: vk::ImageView,
-    // texture_image: vk::Image,
-    // texture_image_memory: vk::DeviceMemory,
-    // texture_image_view: vk::ImageView,
-    // texture_image_sampler: vk::Sampler,
     depth_texture: Texture,
     texture: Texture,
+    model_index_count: usize,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
@@ -236,10 +224,19 @@ impl VulkanApp {
 
         let texture = Self::create_texture_image(&vk_context, command_pool, graphics_queue);
 
-        let (vertex_buffer, vertex_buffer_memory) =
-            Self::create_vertex_buffer(&vk_context, transient_command_pool, graphics_queue);
-        let (index_buffer, index_buffer_memory) =
-            Self::create_index_buffer(&vk_context, transient_command_pool, graphics_queue);
+        let (vertices, indices) = Self::load_model();
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
+            &vk_context,
+            transient_command_pool,
+            graphics_queue,
+            &vertices,
+        );
+        let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
+            &vk_context,
+            transient_command_pool,
+            graphics_queue,
+            &indices,
+        );
 
         let (uniform_buffers, uniform_buffer_memories) =
             Self::create_uniform_buffers(&vk_context, images.len());
@@ -261,6 +258,7 @@ impl VulkanApp {
             properties,
             vertex_buffer,
             index_buffer,
+            indices.len(),
             layout,
             &descriptor_sets,
             pipeline,
@@ -291,6 +289,7 @@ impl VulkanApp {
             depth_format,
             depth_texture,
             texture,
+            model_index_count: indices.len(),
             vertex_buffer,
             vertex_buffer_memory,
             index_buffer,
@@ -1123,7 +1122,7 @@ impl VulkanApp {
         command_pool: vk::CommandPool,
         copy_queue: vk::Queue,
     ) -> Texture {
-        let image = image::open("statue.jpeg").unwrap();
+        let image = image::open("viking_room.png").unwrap().flipv();
         let image_as_rgb = image.to_rgba8();
         let extent = vk::Extent2D {
             width: image.width(),
@@ -1395,17 +1394,52 @@ impl VulkanApp {
         })
     }
 
+    fn load_model() -> (Vec<Vertex>, Vec<u32>) {
+        log::debug!("Loading model.");
+        let (models, _) = tobj::load_obj(
+            &Path::new("viking_room.obj"),
+            &tobj::LoadOptions {
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mesh = &models[0].mesh;
+        let positions = mesh.positions.as_slice();
+        let coords = mesh.texcoords.as_slice();
+        let vertex_count = mesh.positions.len() / 3;
+
+        let mut vertices = Vec::with_capacity(vertex_count);
+        for i in 0..vertex_count {
+            let x = positions[i * 3];
+            let y = positions[i * 3 + 1];
+            let z = positions[i * 3 + 2];
+            let u = coords[i * 2];
+            let v = coords[i * 2 + 1];
+
+            let vertex = Vertex {
+                pos: [x, y, z],
+                color: [1.0, 1.0, 1.0],
+                coords: [u, v],
+            };
+            vertices.push(vertex);
+        }
+
+        (vertices, mesh.indices.clone())
+    }
+
     fn create_vertex_buffer(
         vk_context: &VkContext,
         command_pool: vk::CommandPool,
         transfer_queue: vk::Queue,
+        vertices: &[Vertex],
     ) -> (vk::Buffer, vk::DeviceMemory) {
         Self::create_device_local_buffer_with_data::<u32, _>(
             vk_context,
             command_pool,
             transfer_queue,
             vk::BufferUsageFlags::VERTEX_BUFFER,
-            &VERTICES,
+            &vertices,
         )
     }
 
@@ -1413,13 +1447,14 @@ impl VulkanApp {
         vk_context: &VkContext,
         command_pool: vk::CommandPool,
         transfer_queue: vk::Queue,
+        indices: &[u32],
     ) -> (vk::Buffer, vk::DeviceMemory) {
         Self::create_device_local_buffer_with_data::<u16, _>(
             vk_context,
             command_pool,
             transfer_queue,
             vk::BufferUsageFlags::INDEX_BUFFER,
-            &INDICES,
+            &indices,
         )
     }
 
@@ -1631,6 +1666,7 @@ impl VulkanApp {
         swapchain_properties: SwapchainProperties,
         vertex_buffer: vk::Buffer,
         index_buffer: vk::Buffer,
+        index_count: usize,
         pipeline_layout: vk::PipelineLayout,
         descriptor_sets: &[vk::DescriptorSet],
         graphics_pipeline: vk::Pipeline,
@@ -1706,7 +1742,7 @@ impl VulkanApp {
             unsafe { device.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets) };
 
             // bind index buffer
-            unsafe { device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT16) };
+            unsafe { device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT32) };
 
             unsafe {
                 let null = [];
@@ -1721,7 +1757,7 @@ impl VulkanApp {
             };
 
             // draw
-            unsafe { device.cmd_draw_indexed(buffer, INDICES.len() as _, 1, 0, 0, 0) };
+            unsafe { device.cmd_draw_indexed(buffer, index_count as _, 1, 0, 0, 0) };
 
             // end render pass
             unsafe { device.cmd_end_render_pass(buffer) };
@@ -1910,6 +1946,7 @@ impl VulkanApp {
             properties,
             self.vertex_buffer,
             self.index_buffer,
+            self.model_index_count,
             layout,
             &self.descriptor_sets,
             pipeline,
@@ -1926,6 +1963,7 @@ impl VulkanApp {
         self.depth_texture = depth_texture;
         self.swapchain_framebuffers = swapchain_framebuffers;
         self.command_buffers = command_buffers;
+        self.resize_dimensions = None;
     }
 
     fn cleanup_swapchain(&mut self) {
@@ -1948,16 +1986,21 @@ impl VulkanApp {
 
     fn update_uniform_buffers(&mut self, current_image: u32) {
         let elapsed = self.start_instant.elapsed();
-        let elapsed = elapsed.as_secs() as f32 + (elapsed.subsec_millis() as f32) / 1_000 as f32;
+        let elapsed: f32 =
+            elapsed.as_secs() as f32 + (elapsed.subsec_millis() as f32) / 1_000 as f32;
 
         let aspect = self.swapchain_properties.extent.width as f32
             / self.swapchain_properties.extent.height as f32;
+
+        let rotation =
+            Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, (90.0 * elapsed).to_radians());
+
         let ubo = UniformBufferObject {
-            model: Mat4::from_axis_angle(Vec3::Z, (90.0 * elapsed).to_radians()).to_cols_array_2d(),
+            model: Mat4::from_rotation_translation(rotation, Vec3::ZERO).to_cols_array_2d(),
             view: Mat4::look_at_lh(
                 Vec3::new(2.0, 2.0, 2.0),
                 Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, -1.0),
             )
             .to_cols_array_2d(),
             proj: Mat4::perspective_lh(45.0_f32.to_radians(), aspect, 0.1, 10.0).to_cols_array_2d(),
