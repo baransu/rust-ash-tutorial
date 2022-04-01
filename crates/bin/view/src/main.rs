@@ -14,10 +14,7 @@ use ash::{
         ext::DebugUtils,
         khr::{Surface, Swapchain},
     },
-    vk::{
-        self, DebugUtilsMessageSeverityFlagsEXT, DebugUtilsMessengerEXT, KhrPortabilitySubsetFn,
-        KhrSwapchainFn,
-    },
+    vk::{self, DebugUtilsMessageSeverityFlagsEXT, DebugUtilsMessengerEXT},
     Device, Entry, Instance,
 };
 use context::VkContext;
@@ -873,8 +870,8 @@ impl VulkanApp {
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
-        let vertex_source = Self::read_shader_from_file("shader.vert.spv");
-        let fragment_source = Self::read_shader_from_file("shader.frag.spv");
+        let vertex_source = Self::read_shader_from_file("shaders/shader.vert.spv");
+        let fragment_source = Self::read_shader_from_file("shaders/shader.frag.spv");
 
         let device = vk_context.device();
         let vertex_shader_module = Self::create_shader_module(device, &vertex_source);

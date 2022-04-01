@@ -1,10 +1,8 @@
 #!/bin/bash
 
-rm -rf shader.vert.spv
-rm -rf shader.frag.spv
+rm -rf shaders/*.spv
 
-glslangValidator -V shader.vert
-glslangValidator -V shader.frag
-
-mv vert.spv shader.vert.spv
-mv frag.spv shader.frag.spv
+for f in shaders/*.{vert,frag}; do
+	echo "Compiling $f file...";
+	glslangValidator -V $f -o $f.spv
+done
