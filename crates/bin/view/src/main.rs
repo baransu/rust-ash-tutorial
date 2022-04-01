@@ -32,81 +32,11 @@ const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const ENABLE_VALIDATION_LAYERS: bool = true;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
-// const VERTICES: [Vertex; 8] = [
-//     Vertex {
-//         pos: [-0.5, -0.5, 0.0],
-//         color: [1.0, 0.0, 0.0],
-//         coords: [0.0, 0.0],
-//     },
-//     Vertex {
-//         pos: [0.5, -0.5, 0.0],
-//         color: [0.0, 1.0, 0.0],
-//         coords: [1.0, 0.0],
-//     },
-//     Vertex {
-//         pos: [0.5, 0.5, 0.0],
-//         color: [0.0, 0.0, 1.0],
-//         coords: [1.0, 1.0],
-//     },
-//     Vertex {
-//         pos: [-0.5, 0.5, 0.0],
-//         color: [1.0, 1.0, 1.0],
-//         coords: [0.0, 1.0],
-//     },
-//     // second quad
-//     Vertex {
-//         pos: [-0.5, -0.5, -0.5],
-//         color: [1.0, 1.0, 1.0],
-//         coords: [0.0, 0.0],
-//     },
-//     Vertex {
-//         pos: [0.5, -0.5, -0.5],
-//         color: [1.0, 1.0, 1.0],
-//         coords: [1.0, 0.0],
-//     },
-//     Vertex {
-//         pos: [0.5, 0.5, -0.5],
-//         color: [1.0, 1.0, 1.0],
-//         coords: [1.0, 1.0],
-//     },
-//     Vertex {
-//         pos: [-0.5, 0.5, -0.5],
-//         color: [1.0, 1.0, 1.0],
-//         coords: [0.0, 1.0],
-//     },
-// ];
-// const INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 
 #[cfg(not(target_os = "macos"))]
 const REQUIRED_LAYERS: &[&str] = &["VK_LAYER_LUNARG_standard_validation"];
 #[cfg(target_os = "macos")]
 const REQUIRED_LAYERS: &[&str] = &["VK_LAYER_KHRONOS_validation"];
-
-unsafe extern "system" fn vulkan_debug_callback(
-    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    _user_data: *mut std::os::raw::c_void,
-) -> vk::Bool32 {
-    let callback_data = *p_callback_data;
-    let message = if callback_data.p_message.is_null() {
-        Cow::from("")
-    } else {
-        CStr::from_ptr(callback_data.p_message).to_string_lossy()
-    };
-
-    if message_severity == DebugUtilsMessageSeverityFlagsEXT::VERBOSE {
-        log::debug!("{:?}: {}", message_type, message);
-    } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::INFO {
-        log::info!("{:?}: {}", message_type, message);
-    } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::WARNING {
-        log::warn!("{:?}: {}", message_type, message);
-    } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::ERROR {
-        log::error!("{:?}: {}", message_type, message);
-    }
-
-    vk::FALSE
-}
 
 struct VulkanApp {
     start_instant: Instant,
@@ -443,6 +373,8 @@ impl VulkanApp {
             }
         }
 
+        log::debug!("Found queue families: {:?}", (graphics, present));
+
         (graphics, present)
     }
 
@@ -558,7 +490,7 @@ impl VulkanApp {
                     | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
-            .pfn_user_callback(Some(vulkan_debug_callback));
+            .pfn_user_callback(Some(Self::vulkan_debug_callback));
 
         let debug_utils_loader = DebugUtils::new(&entry, &instance);
         let debug_call_back = unsafe {
@@ -568,6 +500,32 @@ impl VulkanApp {
         };
 
         Some((debug_utils_loader, debug_call_back))
+    }
+
+    unsafe extern "system" fn vulkan_debug_callback(
+        message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+        message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+        p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+        _user_data: *mut std::os::raw::c_void,
+    ) -> vk::Bool32 {
+        let callback_data = *p_callback_data;
+        let message = if callback_data.p_message.is_null() {
+            Cow::from("")
+        } else {
+            CStr::from_ptr(callback_data.p_message).to_string_lossy()
+        };
+
+        if message_severity == DebugUtilsMessageSeverityFlagsEXT::VERBOSE {
+            log::debug!("{:?}: {}", message_type, message);
+        } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::INFO {
+            log::info!("{:?}: {}", message_type, message);
+        } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::WARNING {
+            log::warn!("{:?}: {}", message_type, message);
+        } else if message_severity == DebugUtilsMessageSeverityFlagsEXT::ERROR {
+            log::error!("{:?}: {}", message_type, message);
+        }
+
+        vk::FALSE
     }
 
     fn create_swapchain_and_images(
@@ -662,6 +620,7 @@ impl VulkanApp {
                 Self::create_image_view(
                     vk_context.device(),
                     *image,
+                    1,
                     properties.format.format,
                     vk::ImageAspectFlags::COLOR,
                 )
@@ -672,6 +631,7 @@ impl VulkanApp {
     fn create_image_view(
         device: &Device,
         image: vk::Image,
+        mip_levels: u32,
         format: vk::Format,
         aspect_mask: vk::ImageAspectFlags,
     ) -> vk::ImageView {
@@ -682,7 +642,7 @@ impl VulkanApp {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             })
@@ -1077,6 +1037,7 @@ impl VulkanApp {
             vk_context,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             extent,
+            1,
             format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -1088,12 +1049,13 @@ impl VulkanApp {
             command_pool,
             transition_queue,
             image,
+            1,
             format,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         );
 
-        let view = Self::create_image_view(device, image, format, vk::ImageAspectFlags::DEPTH);
+        let view = Self::create_image_view(device, image, 1, format, vk::ImageAspectFlags::DEPTH);
 
         Texture::new(image, mem, view, None)
     }
@@ -1124,10 +1086,10 @@ impl VulkanApp {
     ) -> Texture {
         let image = image::open("viking_room.png").unwrap().flipv();
         let image_as_rgb = image.to_rgba8();
-        let extent = vk::Extent2D {
-            width: image.width(),
-            height: image.height(),
-        };
+        let width = image.width();
+        let height = image.height();
+        let max_mip_levels = (width.min(height) as f32).log2().floor() as u32 + 1;
+        let extent = vk::Extent2D { width, height };
         let pixels = image_as_rgb.into_raw();
         let image_size = (pixels.len() * size_of::<u8>()) as vk::DeviceSize;
         let device = vk_context.device();
@@ -1152,9 +1114,12 @@ impl VulkanApp {
             vk_context,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             extent,
+            max_mip_levels,
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageTiling::OPTIMAL,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED,
         );
 
         // Transition the image layout and copy the buffer into the image
@@ -1165,6 +1130,7 @@ impl VulkanApp {
                 command_pool,
                 copy_queue,
                 image,
+                max_mip_levels,
                 vk::Format::R8G8B8A8_UNORM,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -1172,14 +1138,14 @@ impl VulkanApp {
 
             Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent);
 
-            Self::transition_image_layout(
-                device,
+            Self::generate_mipmaps(
+                vk_context,
                 command_pool,
                 copy_queue,
                 image,
+                extent,
                 vk::Format::R8G8B8A8_UNORM,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                max_mip_levels,
             );
         }
 
@@ -1191,6 +1157,7 @@ impl VulkanApp {
         let image_view = Self::create_image_view(
             device,
             image,
+            max_mip_levels,
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageAspectFlags::COLOR,
         );
@@ -1211,7 +1178,7 @@ impl VulkanApp {
                 .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                 .mip_lod_bias(0.0)
                 .min_lod(0.0)
-                .max_lod(0.0)
+                .max_lod(max_mip_levels as _)
                 .build();
 
             unsafe { device.create_sampler(&sampler_info, None).unwrap() }
@@ -1224,6 +1191,7 @@ impl VulkanApp {
         vk_context: &VkContext,
         mem_properties: vk::MemoryPropertyFlags,
         extent: vk::Extent2D,
+        mip_levels: u32,
         format: vk::Format,
         tiling: vk::ImageTiling,
         usage: vk::ImageUsageFlags,
@@ -1235,7 +1203,7 @@ impl VulkanApp {
                 height: extent.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .format(format)
             .tiling(tiling)
@@ -1274,6 +1242,7 @@ impl VulkanApp {
         command_pool: vk::CommandPool,
         transtion_queue: vk::Queue,
         image: vk::Image,
+        mip_levels: u32,
         format: vk::Format,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
@@ -1331,7 +1300,7 @@ impl VulkanApp {
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask,
                     base_mip_level: 0,
-                    level_count: 1,
+                    level_count: mip_levels,
                     base_array_layer: 0,
                     layer_count: 1,
                 })
@@ -1392,6 +1361,166 @@ impl VulkanApp {
                 )
             }
         })
+    }
+
+    fn generate_mipmaps(
+        vk_context: &VkContext,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+        image: vk::Image,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        mip_levels: u32,
+    ) {
+        let format_properties = unsafe {
+            vk_context
+                .instance()
+                .get_physical_device_format_properties(vk_context.physical_device(), format)
+        };
+        if !format_properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR)
+        {
+            panic!("Linear blitting is not supported for format {:?}.", format)
+        }
+
+        Self::execute_one_time_commands(
+            vk_context.device(),
+            command_pool,
+            transfer_queue,
+            |buffer| {
+                let mut barrier = vk::ImageMemoryBarrier::builder()
+                    .image(image)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                        level_count: 1,
+                        ..Default::default()
+                    })
+                    .build();
+
+                let mut mip_width = extent.width as i32;
+                let mut mip_height = extent.height as i32;
+                for level in 1..mip_levels {
+                    let next_mip_width = if mip_width > 1 {
+                        mip_width / 2
+                    } else {
+                        mip_width
+                    };
+                    let next_mip_height = if mip_height > 1 {
+                        mip_height / 2
+                    } else {
+                        mip_height
+                    };
+
+                    barrier.subresource_range.base_mip_level = level - 1;
+                    barrier.old_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                    barrier.new_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                    barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+                    barrier.dst_access_mask = vk::AccessFlags::TRANSFER_READ;
+                    let barriers = [barrier];
+
+                    unsafe {
+                        vk_context.device().cmd_pipeline_barrier(
+                            buffer,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            &barriers,
+                        )
+                    };
+
+                    let blit = vk::ImageBlit::builder()
+                        .src_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: mip_width,
+                                y: mip_height,
+                                z: 1,
+                            },
+                        ])
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: level - 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .dst_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: next_mip_width,
+                                y: next_mip_height,
+                                z: 1,
+                            },
+                        ])
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: level,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .build();
+                    let blits = [blit];
+
+                    unsafe {
+                        vk_context.device().cmd_blit_image(
+                            buffer,
+                            image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &blits,
+                            vk::Filter::LINEAR,
+                        )
+                    };
+
+                    barrier.old_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                    barrier.new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+                    barrier.src_access_mask = vk::AccessFlags::TRANSFER_READ;
+                    barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+                    let barriers = [barrier];
+
+                    unsafe {
+                        vk_context.device().cmd_pipeline_barrier(
+                            buffer,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::FRAGMENT_SHADER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            &barriers,
+                        )
+                    };
+
+                    mip_width = next_mip_width;
+                    mip_height = next_mip_height;
+                }
+
+                barrier.subresource_range.base_mip_level = mip_levels - 1;
+                barrier.old_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                barrier.new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+                barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+                barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+                let barriers = [barrier];
+
+                unsafe {
+                    vk_context.device().cmd_pipeline_barrier(
+                        buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &barriers,
+                    )
+                };
+            },
+        );
     }
 
     fn load_model() -> (Vec<Vertex>, Vec<u32>) {
